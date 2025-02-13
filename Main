@@ -1,0 +1,164 @@
+package com.mouui.CooldownCounter;
+
+import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.FontRenderer;
+import net.minecraft.util.text.ITextComponent;
+import net.minecraft.util.text.StringTextComponent;
+import net.minecraftforge.client.event.ClientChatReceivedEvent;
+import net.minecraftforge.client.event.RenderGameOverlayEvent;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.common.MinecraftForge;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.net.URL;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.Enumeration;
+import java.util.Scanner;
+import java.net.UnknownHostException;
+
+@Mod("cooldowncounter")
+public class CooldownCounter {
+    private static final String HOE_PROCCED_MESSAGE = "You have received 1x"; // A part of the message to detect hoe procs.
+    private static final Duration COOLDOWN_DURATION = Duration.ofMinutes(5); // 5-minute cooldown.
+    private LocalDateTime cooldownEnd = null; // Tracks the end time of the cooldown.
+    private boolean isLicenseValid = false; // Tracks whether the license is valid
+
+    private static final Path LICENSE_FILE = Paths.get(System.getProperty("user.home"),
+            "AppData", "Roaming", ".technic", "modpacks", "complex-pixelmon-reforged", "cooldowncounter_license.txt");
+    private static final String LICENSE_SERVER_URL = "https://licensing-server-b92q.onrender.com/validate-license?licenseKey=";
+
+    public CooldownCounter() {
+        MinecraftForge.EVENT_BUS.register(this); // Register event listeners
+        validateLicenseWithRetry(); // Attempt to validate the license
+    }
+
+    // License validation with retry logic
+    private void validateLicenseWithRetry() {
+        while (!isLicenseValid) {
+            try {
+                isLicenseValid = validateLicense();
+                if (!isLicenseValid) {
+                    Minecraft.getInstance().player.displayClientMessage(new StringTextComponent("Invalid license key, retrying in 1 second..."), false);
+                    Thread.sleep(1000); // Wait for 1 second before retrying
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    // Method to get machine identifier (e.g., MAC address)
+    private String getMachineIdentifier() {
+        try {
+            Enumeration<NetworkInterface> networks = NetworkInterface.getNetworkInterfaces();
+            while (networks.hasMoreElements()) {
+                NetworkInterface network = networks.nextElement();
+                byte[] mac = network.getHardwareAddress();
+                if (mac != null) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < mac.length; i++) {
+                        sb.append(String.format("%02X%s", mac[i], (i < mac.length - 1) ? "-" : ""));
+                    }
+                    return sb.toString(); // Return MAC address
+                }
+            }
+        } catch (SocketException e) {
+            e.printStackTrace();
+        }
+        return "unknown"; // Fallback
+    }
+
+    // Validate the license by checking with the server, including machine identifier
+    private boolean validateLicense() {
+        try {
+            String licenseKey = readLicenseKey();
+            if (licenseKey == null) {
+                Minecraft.getInstance().player.displayClientMessage(new StringTextComponent("License key file not found."), false);
+                return false;
+            }
+
+            String hwid = getMachineIdentifier(); // Get machine-specific identifier
+            URL url = new URL(LICENSE_SERVER_URL + licenseKey + "&hwid=" + hwid); // Send license key and HWID
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode == 200) { // Success
+                Scanner sc = new Scanner(conn.getInputStream());
+                String response = sc.nextLine();
+                sc.close();
+                return response.contains("\"valid\":true");
+            } else {
+                return false; // Invalid license
+            }
+        } catch (UnknownHostException e) {
+            Minecraft.getInstance().player.displayClientMessage(new StringTextComponent("Cannot reach license server, please check your connection."), false);
+            return false;
+        } catch (IOException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    // Read the license key from the file
+    private String readLicenseKey() {
+        try (BufferedReader reader = new BufferedReader(new FileReader(LICENSE_FILE.toFile()))) {
+            return reader.readLine().trim();
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    @SubscribeEvent
+    public void onChatMessage(ClientChatReceivedEvent event) {
+        if (!isLicenseValid) return; // Prevent functionality if license is invalid
+
+        String message = event.getMessage().getString();
+        if (message.contains(HOE_PROCCED_MESSAGE)) {
+            // Start the cooldown when the hoe procs
+            cooldownEnd = LocalDateTime.now().plus(COOLDOWN_DURATION);
+        }
+    }
+
+    @SubscribeEvent
+    public void onRenderOverlay(RenderGameOverlayEvent.Text event) {
+        if (!isLicenseValid) return; // Prevent rendering
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.level == null) return;
+
+        // Render information in the top right
+        String displayText = getCooldownText();
+        FontRenderer fontRenderer = mc.font;
+
+        int width = mc.getWindow().getGuiScaledWidth();
+
+        // Render the text in the top right
+        fontRenderer.drawShadow(event.getMatrixStack(), displayText, width - 100, 10, 0xFFFFFF); // Updated method call
+    }
+
+    private String getCooldownText() {
+        if (cooldownEnd == null) {
+            return "No Cooldown"; // No cooldown is active
+        }
+        Duration remaining = Duration.between(LocalDateTime.now(), cooldownEnd);
+        if (remaining.isNegative() || remaining.isZero()) {
+            cooldownEnd = null; // Reset cooldown when time is up
+            return "No Cooldown";
+        } else {
+            long minutes = remaining.toMinutes();
+            long seconds = remaining.minusMinutes(minutes).getSeconds();
+            return String.format("Cooldown: %02d:%02d", minutes, seconds);
+        }
+    }
+}
